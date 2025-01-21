@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.28.1"
+libc = "0.2.169"
+termion = "4.0.3"
