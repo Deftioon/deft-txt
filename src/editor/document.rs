@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, cmp};
 use crate::editor::row;
 
 pub struct Document{
@@ -28,5 +28,9 @@ impl Document{
 
     pub fn rows(&self) -> usize{
         self.rows.len()
+    }
+
+    pub fn cols(&self) -> usize{
+        self.rows.iter().map(|row| row.buffer_length()).max().unwrap_or(0) as usize
     }
 }

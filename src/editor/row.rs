@@ -45,7 +45,7 @@ impl GapBuffer {
         self.buffer_start = new_buffer;
     }
 
-    fn buffer_length(&self) -> isize {
+    pub fn buffer_length(&self) -> isize {
         let head_length = ptr_diff(self.gap_start, self.buffer_start);
         let tail_length = ptr_diff(self.buffer_end, self.gap_end);
         head_length + tail_length
