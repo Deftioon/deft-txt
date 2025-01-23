@@ -170,6 +170,10 @@ impl GapBuffer {
         buffer
     }
 
+    pub fn str_len(&self) -> usize {
+        self.to_string().chars().count()
+    }
+
     pub fn render(&self, start: usize, end: usize) -> String {
         let end = cmp::min(end, self.buffer_length() as usize);
         let start = cmp::min(start, end);

@@ -1,4 +1,4 @@
-use crate::editor::{document, row, terminal::{self, Terminal}};
+use crate::editor::{document, terminal};
 
 pub static BLACK: &str = "\x1B[0;30m";
 pub static RED: &str = "\x1B[0;31m";
@@ -27,6 +27,7 @@ pub struct Editor {
     display_y: usize,
     file_cols: usize,
     file_rows: usize,
+    previous_positions: Vec<(usize, usize)>,
 }
 
 impl Editor {
@@ -49,6 +50,7 @@ impl Editor {
             display_y: 0,
             file_cols: doc_cols,
             file_rows: doc_rows,
+            previous_positions: Vec::new(),
         })
     }
 
@@ -97,6 +99,8 @@ impl Editor {
         Ok(())
     }
 
+    // TODO: Fix the cursor state save where it should return to previous position
+    // Error occurs when moving up and down not corresponding to the previous position.
     pub fn move_cursor(&mut self, key: termion::event::Key) {
         let min_y = self.display_height/2;
         let min_x = 0;
@@ -109,13 +113,39 @@ impl Editor {
                     if self.display_y == 0 {
                         self.cursor_y = self.cursor_y.saturating_sub(1);
                     }
+                    let curr_row_len = self.document.row(self.display_y+self.cursor_y).unwrap().str_len();
+                    if self.cursor_x <= curr_row_len {
+                        match self.previous_positions.pop() {
+                            Some((x, _)) => {
+                                self.cursor_x = x;
+                            },
+                            None => (),
+                        }
+                    }
+                    if self.cursor_x > curr_row_len {
+                        self.previous_positions.push((self.cursor_x, self.cursor_y + 1));
+                        self.cursor_x = curr_row_len;
+                    }
             },
             termion::event::Key::Down => {
                 if self.display_y < max_y && self.cursor_y == min_y {
-                    self.display_y += 1;
+                    self.display_y = self.display_y.saturating_add(1);
                 }
                 if self.display_y == 0 {
-                    self.cursor_y += 1;
+                    self.cursor_y = self.cursor_y.saturating_add(1);
+                }
+                let curr_row_len = self.document.row(self.display_y+self.cursor_y).unwrap().str_len();
+                if self.cursor_x <= curr_row_len {
+                    match self.previous_positions.pop() {
+                        Some((x, _)) => {
+                            self.cursor_x = x;
+                        },
+                        None => (),
+                    }
+                }
+                if self.cursor_x > curr_row_len {
+                    self.previous_positions.push((self.cursor_x, self.cursor_y - 1));
+                    self.cursor_x = curr_row_len;
                 }
             },
             termion::event::Key::Left => {
@@ -127,6 +157,9 @@ impl Editor {
                 }
             },
             termion::event::Key::Right => {
+                if self.cursor_x == self.document.row(self.cursor_y).unwrap().str_len() {
+                    return;
+                }
                 if self.cursor_x < self.display_width {
                     self.cursor_x = self.cursor_x.saturating_add(1);
                 }
