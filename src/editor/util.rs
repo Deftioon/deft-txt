@@ -1,172 +1,131 @@
-
-extern crate libc;
-
-use std::{fmt, mem, cmp};
-use std::ops::{Drop, Range};
-
-const CHUNK_SIZE: isize = 8;
+use std::{fmt, cmp};
+use std::ops::Range;
 
 pub struct GapBuffer {
-    buffer_start: *mut u8,
-    gap_start: *mut u8,
-    gap_end: *mut u8,
-    buffer_end: *mut u8,
+    buffer: Vec<u8>,
+    gap_start: usize,
+    gap_end: usize,
 }
 
 impl GapBuffer {
     pub fn new(capacity: usize) -> Self {
-        let buffer = unsafe {
-            let size = mem::size_of::<u8>() * capacity;
-            libc::malloc(size) as *mut u8
-        };
-
-        if buffer.is_null() && capacity > 0 {
-            panic!("Failed to allocate memory for GapBuffer");
-        }
-
-        GapBuffer{
-            buffer_start: buffer,
-            gap_start: buffer,
-            gap_end: unsafe { buffer.offset(capacity as isize) },
-            buffer_end: unsafe { buffer.offset(capacity as isize) },
+        let mut buffer = Vec::with_capacity(capacity);
+        buffer.resize(capacity, 0);
+        GapBuffer {
+            buffer,
+            gap_start: 0,
+            gap_end: capacity,
         }
     }
 
-    pub fn extend(&mut self, amount: isize) {
-        let current_size = ptr_diff(self.buffer_end, self.buffer_start);
-        let new_size = mem::size_of::<u8>() * amount as usize + current_size as usize;
+    pub fn buffer_length(&self) -> usize {
+        self.buffer.len() - self.gap_length()
+    }
+
+    fn gap_length(&self) -> usize {
+        self.gap_end - self.gap_start
+    }
+
+    fn grow_gap(&mut self, needed: usize) {
+        let current_length = self.buffer.len();
+        let new_size = current_length + needed.max(CHUNK_SIZE);
+        let post_gap_length = current_length - self.gap_end;
         
-        let new_buffer = unsafe {
-            libc::realloc(self.buffer_start as *mut libc::c_void, new_size) as *mut u8
-        };
-
-        assert!(!new_buffer.is_null(), "Failed to reallocate memory for GapBuffer");
-
-        self.buffer_start = new_buffer;
+        self.buffer.resize(new_size, 0);
+        
+        // Move post-gap content to new position
+        let new_gap_end = new_size - post_gap_length;
+        self.buffer.copy_within(
+            self.gap_end..current_length,
+            new_gap_end
+        );
+        
+        self.gap_end = new_gap_end;
     }
 
-    pub fn buffer_length(&self) -> isize {
-        let head_length = ptr_diff(self.gap_start, self.buffer_start);
-        let tail_length = ptr_diff(self.buffer_end, self.gap_end);
-        head_length + tail_length
-    }
-
-    fn gap_length(&self) -> isize {
-        ptr_diff(self.gap_end, self.gap_start)
-    }
-
-    fn grow_gap(&mut self, size: isize) {
-        let available = self.gap_length();
-        let needed = size - available;
-
-        let mut chunk = (needed as f32 / CHUNK_SIZE as f32).ceil() as isize;
-        chunk *= CHUNK_SIZE;
-
-        let head_length = ptr_diff(self.gap_start, self.buffer_start);
-        let tail_length = ptr_diff(self.buffer_end, self.gap_end);
-        let new_gap_size = self.gap_length() + chunk;
-        let buffer_length = head_length + tail_length;
-
-        self.extend(chunk);
-        unsafe {
-            libc::memmove(
-                self.gap_start as *mut libc::c_void,
-                self.gap_end as *mut libc::c_void,
-                tail_length as usize,
-            );
-
-            self.gap_start = self.gap_start.offset(buffer_length);
-            self.gap_end = self.gap_start.offset(new_gap_size);
-            self.buffer_end = self.gap_end;
+    pub fn move_gap(&mut self, new_gap_start: usize) {
+        if new_gap_start == self.gap_start {
+            return;
         }
+    
+        let shift = new_gap_start as isize - self.gap_start as isize;
+    
+        if shift > 0 {
+            // Positive shift: move gap to the right
+            let shift = shift as usize;
+            self.buffer.copy_within(
+                self.gap_end..self.gap_end + shift,
+                self.gap_start,
+            );
+        } else {
+            // Negative shift: move gap to the left
+            let shift_abs = shift.unsigned_abs(); // Absolute value as usize
+            let source_start = self.gap_start.saturating_sub(shift_abs);
+            let dest_start = self.gap_end.saturating_sub(shift_abs);
+    
+            self.buffer.copy_within(
+                source_start..self.gap_start,  // Source range
+                dest_start,                    // Destination start
+            );
+        }
+    
+        // Update gap positions with overflow protection
+        self.gap_end = (self.gap_end as isize)
+            .saturating_add(shift)  // Prevent overflow/underflow
+            as usize;
+        self.gap_start = new_gap_start;
     }
 
-    fn move_gap(&mut self, offset: isize) {
-        let gap_len = self.gap_length();
-        let new_pos = unsafe {
-            self.buffer_start.offset(offset)
-        };
+    pub fn insert_char(&mut self, offset: usize, c: char) {
+        let mut bytes = [0; 4];
+        let bytes = c.encode_utf8(&mut bytes).as_bytes();
+        self.insert(offset, bytes);
+    }
 
-        let diff = ptr_diff(new_pos, self.gap_start);
-
-        if diff == 0 {
+    pub fn insert(&mut self, offset: usize, content: &[u8]) {
+        if content.is_empty() {
             return;
         }
 
-        if diff < 0 {
-            unsafe {
-                self.gap_start = new_pos;
-                self.gap_end = self.gap_start.offset(gap_len);
-                libc::memmove(
-                    self.gap_end as *mut libc::c_void,
-                    self.gap_start as *mut libc::c_void,
-                    -diff as usize,
-                );
-            }
-        }
-        else {
-            unsafe {
-                self.gap_end = self.gap_end.offset(diff);
-                self.gap_start = self.gap_start.offset(diff);
-                libc::memmove(
-                    new_pos as *mut libc::c_void,
-                    self.gap_start as *mut libc::c_void,
-                    diff as usize,
-                );
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.gap_start = self.buffer_start;
-        self.gap_end = self.buffer_end;
-    }
-
-    fn head(&self) -> String {
-        let head_len = ptr_diff(self.gap_start, self.buffer_start) as usize;
-        string_from_slice(self.buffer_start, head_len)
-    }
-    fn tail(&self) -> String {
-        let tail_len = ptr_diff(self.buffer_end, self.gap_end) as usize;
-        string_from_slice(self.gap_end, tail_len)
-    }
-
-    pub fn insert(&mut self, offset: usize, s: &str) {
-        let len = s.len() as isize;
-        if len > self.gap_length() {
-            self.grow_gap(len);
+        let required_space = content.len();
+        if self.gap_length() < required_space {
+            self.grow_gap(required_space);
         }
 
-        self.move_gap(offset as isize);
-
-        let src_ptr = s.as_bytes().as_ptr();
-        unsafe {
-            libc::memcpy(
-                self.gap_start as *mut libc::c_void, 
-                src_ptr as *const libc::c_void, 
-                len as usize
-            );
-            self.gap_start = self.gap_start.offset(len);
-        }
+        self.move_gap(offset);
+        self.buffer.splice(
+            self.gap_start..self.gap_start + content.len(),
+            content.iter().cloned()
+        );
+        self.gap_start += content.len();
     }
 
     pub fn remove(&mut self, range: Range<usize>) {
-        let buffer_length = self.buffer_length() as usize;
-        assert!(range.start <= buffer_length && range.end <= buffer_length, "Index out of bounds");
-        assert!(range.start <= range.end, "Invalid range");
+        // Calculate indices without holding references
+        let pre_len = range.start;
+        let post_start = range.end;
+        let post_len = self.buffer.len() - post_start;
+    
+        // Create new buffer by directly slicing into the old buffer
+        let mut new_buffer = Vec::with_capacity(pre_len + post_len);
+        new_buffer.extend_from_slice(&self.buffer[0..pre_len]);
+        new_buffer.extend_from_slice(&self.buffer[post_start..]);
+    
+        // Replace the old buffer (no outstanding references exist here)
+        self.buffer = new_buffer;
+    
+        // Update gap positions
+        self.gap_start = pre_len;
+        self.gap_end = self.buffer.capacity() - post_len;
+    }
 
-        let s = self.to_string();
-        let head = &s[0..range.start];
-        let tail = &s[range.end..];
-
-        self.clear();
-        self.insert(0, &head);
-        self.insert(head.len(), &tail);
+    pub fn remove_char(&mut self, offset: usize) {
+        self.remove(offset..offset + 1);
     }
 
     pub fn from_str(s: &str) -> Self {
         let mut buffer = GapBuffer::new(s.len());
-        buffer.insert(0, s);
+        buffer.insert(0, s.as_bytes());
         buffer
     }
 
@@ -175,41 +134,18 @@ impl GapBuffer {
     }
 
     pub fn render(&self, start: usize, end: usize) -> String {
-        let end = cmp::min(end, self.buffer_length() as usize);
+        let combined = [&self.buffer[0..self.gap_start], &self.buffer[self.gap_end..]].concat();
+        let end = cmp::min(end, combined.len());
         let start = cmp::min(start, end);
-        let s = self.to_string();
-        s[start..end].to_string()
+        String::from_utf8_lossy(&combined[start..end]).to_string()
     }
 }
 
 impl fmt::Display for GapBuffer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}{}", self.head(), self.tail())
+        let combined = [&self.buffer[0..self.gap_start], &self.buffer[self.gap_end..]].concat();
+        write!(f, "{}", String::from_utf8_lossy(&combined))
     }
 }
 
-impl Drop for GapBuffer {
-    fn drop(&mut self) {
-        unsafe {
-            libc::free(self.buffer_start as *mut libc::c_void);
-        }
-    }
-}
-
-fn string_from_slice(start: *mut u8, len: usize) -> String {
-    let mut s = String::with_capacity(len);
-    let temp = unsafe{
-        String::from_raw_parts(start as *mut u8, len, len)
-    };
-    s.push_str(&temp);
-    mem::forget(temp);
-    s
-}
-
-fn ptr_to_isize(p: *const u8) -> isize {
-    unsafe { mem::transmute::<*const u8, isize>(p) }
-}
-
-fn ptr_diff(p: *const u8, q: *const u8) -> isize {
-    ptr_to_isize(p) - ptr_to_isize(q)
-}
+const CHUNK_SIZE: usize = 64;

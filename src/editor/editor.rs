@@ -91,12 +91,56 @@ impl Editor {
             termion::event::Key::Ctrl('q') => {
                 self.exit = true;
             },
+            termion::event::Key::Ctrl('s') => {
+                self.save()?;
+            },
             termion::event::Key::Up | termion::event::Key::Down | termion::event::Key::Left | termion::event::Key::Right => {
                 self.move_cursor(key);
+            },
+            termion::event::Key::Backspace => {
+                self.backspace();
+            },
+            termion::event::Key::Delete => {
+                self.delete();
+            },
+            termion::event::Key::Char(_) => {
+                self.insert_text(key);
             },
             _ => (),
         }
         Ok(())
+    }
+
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        self.document.save()
+    }
+
+    pub fn insert_text(&mut self, key: termion::event::Key) {
+        match key {
+            termion::event::Key::Char(c) => {
+                let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
+                row.insert_char(self.cursor_x, c);
+                self.cursor_x = self.cursor_x.saturating_add(1);
+            },
+            _ => (),
+        }
+    }
+
+    //TODO: Pressing backspace and insertion in rapid succession causes the next character to be deleted also.
+    //TODO: does not handle backspace at the beginning of the line
+    pub fn backspace(&mut self) {
+        let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
+        if self.cursor_x > 0 {
+            row.remove_char(self.cursor_x - 1);
+            self.cursor_x = self.cursor_x.saturating_sub(1);
+        }
+    }
+
+    pub fn delete(&mut self) {
+        let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
+        if self.cursor_x < row.str_len() {
+            row.remove_char(self.cursor_x + 1);
+        }
     }
 
     // TODO: Fix the cursor state save where it should return to previous position
@@ -155,6 +199,7 @@ impl Editor {
                 if self.cursor_x == min_x && self.display_x > 0 {
                     self.display_x = self.display_x.saturating_sub(1);
                 }
+                self.previous_positions = Vec::new();
             },
             termion::event::Key::Right => {
                 if self.cursor_x == self.document.row(self.cursor_y).unwrap().str_len() {
@@ -166,6 +211,7 @@ impl Editor {
                 if self.cursor_x == self.display_width && self.display_x < max_x {
                     self.display_x = self.display_x.saturating_add(1);
                 }
+                self.previous_positions = Vec::new();
             },
             _ => (),
         }
