@@ -2,9 +2,9 @@ use std::{fs, cmp};
 use crate::editor::util;
 
 pub struct Document{
-    rows: Vec<util::GapBuffer>,
-    file_type: String,
-    file_path: String,
+    pub rows: Vec<util::GapBuffer>,
+    pub file_type: String,
+    pub file_path: String,
 }
 
 impl Document{
@@ -32,6 +32,34 @@ impl Document{
     pub fn print(&self){
         for row in &self.rows{
             println!("{}", row.to_string());
+        }
+    }
+
+    pub fn new_line(&mut self, row_idx: usize, col: usize) {
+        if let Some(current_row) = self.rows.get_mut(row_idx) {
+            // Get the full content as a UTF-8 string
+            let content = current_row.to_string();
+            
+            // Find the byte offset for the character position
+            let mut byte_offset = content.len(); // Default to end if col is out of bounds
+            let mut current_char = 0;
+            for (idx, _) in content.char_indices() {
+                if current_char == col {
+                    byte_offset = idx;
+                    break;
+                }
+                current_char += 1;
+            }
+    
+            // Split the content into two parts
+            let (pre_split, post_split) = content.split_at(byte_offset);
+    
+            // Replace current row with pre-split content
+            *current_row = util::GapBuffer::from_str(pre_split);
+    
+            // Create new row with post-split content
+            let new_row = util::GapBuffer::from_str(post_split);
+            self.rows.insert(row_idx + 1, new_row);
         }
     }
     

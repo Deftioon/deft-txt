@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::editor::{document, terminal};
 
 pub static BLACK: &str = "\x1B[0;30m";
@@ -15,6 +17,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
+enum EditorState {
+    EDIT,
+    COMMAND,
+}
+
 pub struct Editor {
     terminal: terminal::Terminal,
     document: document::Document,
@@ -27,7 +34,8 @@ pub struct Editor {
     display_y: usize,
     file_cols: usize,
     file_rows: usize,
-    previous_positions: Vec<(usize, usize)>,
+    previous_positions: VecDeque<(usize, usize)>,
+    state: EditorState,
 }
 
 impl Editor {
@@ -50,7 +58,8 @@ impl Editor {
             display_y: 0,
             file_cols: doc_cols,
             file_rows: doc_rows,
-            previous_positions: Vec::new(),
+            previous_positions: VecDeque::new(),
+            state: EditorState::EDIT,
         })
     }
 
@@ -103,6 +112,9 @@ impl Editor {
             termion::event::Key::Delete => {
                 self.delete();
             },
+            termion::event::Key::Char('\n') => {
+                self.enter();
+            },
             termion::event::Key::Char(_) => {
                 self.insert_text(key);
             },
@@ -131,21 +143,86 @@ impl Editor {
     pub fn backspace(&mut self) {
         let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
         if self.cursor_x > 0 {
-            row.remove_char(self.cursor_x - 1);
-            self.cursor_x = self.cursor_x.saturating_sub(1);
+            row.remove_char(self.display_x + self.cursor_x - 1);
+            if self.display_x == 0 {
+                self.cursor_x = self.cursor_x.saturating_sub(1);
+            }
+            else {
+                self.display_x = self.display_x.saturating_sub(1);
+            }
+        }
+        else if self.cursor_x == 0 {
+            // Handle line merging with previous line
+            let current_row = self.display_y + self.cursor_y;
+            if current_row > 0 {
+                // Capture current line content
+                let current_content = self.document.rows[current_row].to_string();
+                
+                // Remove current line
+                self.document.rows.remove(current_row);
+                
+                // Get previous line references
+                let prev_row = current_row - 1;
+                if let Some(prev_line) = self.document.rows.get_mut(prev_row) {
+                    // Get previous line's character count and byte length
+                    let prev_char_len = prev_line.str_len();
+                    let prev_byte_len = prev_line.buffer_length();
+                    
+                    // Insert current content at end of previous line
+                    prev_line.insert(prev_byte_len, current_content.as_bytes());
+                    
+                    // Update cursor position
+                    self.cursor_y = self.cursor_y.saturating_sub(1);
+                    self.cursor_x = prev_char_len;
+                    
+                    // Update document dimensions
+                    self.file_rows = self.document.rows();
+                    self.file_cols = self.document.cols();
+                }
+            }
         }
     }
 
     pub fn delete(&mut self) {
         let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
         if self.cursor_x < row.str_len() {
-            row.remove_char(self.cursor_x + 1);
+            row.remove_char(self.display_x + self.cursor_x);
         }
+    }
+
+    pub fn enter(&mut self) {
+        let actual_row = self.display_y + self.cursor_y;
+        let current_col = self.cursor_x;
+        
+        self.document.new_line(actual_row, current_col);
+        
+        // Move cursor to start of new line
+        self.cursor_x = 0;
+        if self.display_y == 0 {
+            self.cursor_y += 1;
+        } else {
+            self.display_y += 1;
+        }
+    }
+
+    pub fn move_cursor(&mut self, key: termion::event::Key) {
+        match self.state {
+            EditorState::EDIT => {
+                self.move_cursor_edit(key);
+            },
+            EditorState::COMMAND => {
+                self.move_cursor_command(key);
+            },
+        }
+    }
+
+    pub fn move_cursor_command(&mut self, key: termion::event::Key) {
+
     }
 
     // TODO: Fix the cursor state save where it should return to previous position
     // Error occurs when moving up and down not corresponding to the previous position.
-    pub fn move_cursor(&mut self, key: termion::event::Key) {
+    pub fn move_cursor_edit(&mut self, key: termion::event::Key) {
         let min_y = self.display_height/2;
         let min_x = 0;
         let max_y = self.file_rows - self.display_height/2;
@@ -159,7 +236,7 @@ impl Editor {
                     }
                     let curr_row_len = self.document.row(self.display_y+self.cursor_y).unwrap().str_len();
                     if self.cursor_x <= curr_row_len {
-                        match self.previous_positions.pop() {
+                        match self.previous_positions.pop_back() {
                             Some((x, _)) => {
                                 self.cursor_x = x;
                             },
@@ -167,20 +244,24 @@ impl Editor {
                         }
                     }
                     if self.cursor_x > curr_row_len {
-                        self.previous_positions.push((self.cursor_x, self.cursor_y + 1));
+                        self.previous_positions.push_back((self.cursor_x, self.cursor_y + 1));
                         self.cursor_x = curr_row_len;
                     }
             },
             termion::event::Key::Down => {
+                if self.display_y == max_y - 1 { // -1 because of 0 indexing
+                    return;
+                }
+
                 if self.display_y < max_y && self.cursor_y == min_y {
                     self.display_y = self.display_y.saturating_add(1);
                 }
                 if self.display_y == 0 {
                     self.cursor_y = self.cursor_y.saturating_add(1);
                 }
-                let curr_row_len = self.document.row(self.display_y+self.cursor_y).unwrap().str_len();
+                let curr_row_len = self.document.row(self.display_y + self.cursor_y).unwrap().str_len();
                 if self.cursor_x <= curr_row_len {
-                    match self.previous_positions.pop() {
+                    match self.previous_positions.pop_back() {
                         Some((x, _)) => {
                             self.cursor_x = x;
                         },
@@ -188,7 +269,7 @@ impl Editor {
                     }
                 }
                 if self.cursor_x > curr_row_len {
-                    self.previous_positions.push((self.cursor_x, self.cursor_y - 1));
+                    self.previous_positions.push_back((self.cursor_x, self.cursor_y - 1));
                     self.cursor_x = curr_row_len;
                 }
             },
@@ -199,10 +280,10 @@ impl Editor {
                 if self.cursor_x == min_x && self.display_x > 0 {
                     self.display_x = self.display_x.saturating_sub(1);
                 }
-                self.previous_positions = Vec::new();
+                self.previous_positions = VecDeque::new();
             },
             termion::event::Key::Right => {
-                if self.cursor_x == self.document.row(self.cursor_y).unwrap().str_len() {
+                if self.cursor_x == self.document.row(self.display_y + self.cursor_y).unwrap().str_len() {
                     return;
                 }
                 if self.cursor_x < self.display_width {
@@ -211,7 +292,7 @@ impl Editor {
                 if self.cursor_x == self.display_width && self.display_x < max_x {
                     self.display_x = self.display_x.saturating_add(1);
                 }
-                self.previous_positions = Vec::new();
+                self.previous_positions = VecDeque::new();
             },
             _ => (),
         }
