@@ -10,6 +10,7 @@ pub static BLUE: &str = "\x1B[0;34m";
 pub static MAGENTA: &str = "\x1B[0;35m";
 pub static CYAN: &str = "\x1B[0;36m";
 pub static WHITE: &str = "\x1B[0;37m";
+pub static STATUS_BAR: &str = "\x1B[48;5;237m";
 static ANSI_END: &str = "\x1B[0m";
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -36,6 +37,7 @@ pub struct Editor {
     file_rows: usize,
     previous_positions: VecDeque<(usize, usize)>,
     state: EditorState,
+    key_pressed: Option<termion::event::Key>,
 }
 
 impl Editor {
@@ -44,7 +46,7 @@ impl Editor {
         let document = document::Document::open("test.txt");
         let doc_rows = document.rows();
         let doc_cols = document.cols();
-        let display_height = terminal.height - 1;
+        let display_height = terminal.height - 2;
         let display_width = terminal.width;
         Ok(Editor {
             terminal,
@@ -60,25 +62,26 @@ impl Editor {
             file_rows: doc_rows,
             previous_positions: VecDeque::new(),
             state: EditorState::EDIT,
+            key_pressed: None,
         })
     }
 
     pub fn run(&mut self) {
         self.terminal.clear_screen();
         loop {
+            if let Err(err) = self.process_keys() {
+                self.kill(err);
+            }
             if let Err(err) = self.refresh_screen() {
                 self.kill(err);
             }
             if self.exit {
                 break;
             }
-            if let Err(err) = self.process_keys() {
-                self.kill(err);
-            }
         }
     }
 
-    pub fn render_doc(&self) {
+    pub fn render(&self) {
         for row_num in self.display_y..self.display_y + self.display_height {
             self.terminal.clear_line();
             if row_num < self.document.rows() {
@@ -91,11 +94,15 @@ impl Editor {
             else {
                 println!("~\r");
             }
+            if row_num == self.display_y + self.display_height - 1 {
+                self.status_bar(self.key_pressed.as_ref().unwrap());
+            }
         }
     }
 
     pub fn process_keys(&mut self) -> Result<(), std::io::Error> {
         let key = self.terminal.read_key()?;
+        self.key_pressed = Some(key);
         match key {
             termion::event::Key::Ctrl('q') => {
                 self.exit = true;
@@ -103,7 +110,7 @@ impl Editor {
             termion::event::Key::Ctrl('s') => {
                 self.save()?;
             },
-            termion::event::Key::Up | termion::event::Key::Down | termion::event::Key::Left | termion::event::Key::Right => {
+            termion::event::Key::Up | termion::event::Key::Down | termion::event::Key::Left | termion::event::Key::Right | termion::event::Key::Home | termion::event::Key::End => {
                 self.move_cursor(key);
             },
             termion::event::Key::Backspace => {
@@ -152,10 +159,10 @@ impl Editor {
             }
         }
         else if self.cursor_x == 0 {
-            // Handle line merging with previous line
+            // line merging with previous line
             let current_row = self.display_y + self.cursor_y;
             if current_row > 0 {
-                // Capture current line content
+                // get current line content
                 let current_content = self.document.rows[current_row].to_string();
                 
                 // Remove current line
@@ -172,7 +179,12 @@ impl Editor {
                     prev_line.insert(prev_byte_len, current_content.as_bytes());
                     
                     // Update cursor position
-                    self.cursor_y = self.cursor_y.saturating_sub(1);
+                    if self.display_y == 0 {
+                        self.cursor_y = self.cursor_y.saturating_sub(1);
+                    }
+                    else {
+                        self.display_y = self.display_y.saturating_sub(1);
+                    }
                     self.cursor_x = prev_char_len;
                     
                     // Update document dimensions
@@ -188,6 +200,32 @@ impl Editor {
         if self.cursor_x < row.str_len() {
             row.remove_char(self.display_x + self.cursor_x);
         }
+        else if self.cursor_x == row.str_len() {
+            // line merging with next line
+            let current_row = self.display_y + self.cursor_y;
+            if current_row < self.file_rows - 1 {
+                // get current line content
+                let current_content = self.document.rows[current_row].to_string();
+                
+                // Remove current line
+                self.document.rows.remove(current_row);
+                
+                // Get next line references
+                let next_row = current_row;
+                if let Some(next_line) = self.document.rows.get_mut(next_row) {
+                    // Get next line's character count and byte length
+                    let next_char_len = next_line.str_len();
+                    let next_byte_len = next_line.buffer_length();
+                    
+                    // Insert current content at beginning of next line
+                    next_line.insert(0, current_content.as_bytes());
+                    
+                    // Update document dimensions
+                    self.file_rows = self.document.rows();
+                    self.file_cols = self.document.cols();
+                }
+            }
+        }
     }
 
     pub fn enter(&mut self) {
@@ -195,14 +233,12 @@ impl Editor {
         let current_col = self.cursor_x;
         
         self.document.new_line(actual_row, current_col);
+
+        self.file_rows = self.document.rows();
+        self.file_cols = self.document.cols();
         
-        // Move cursor to start of new line
         self.cursor_x = 0;
-        if self.display_y == 0 {
-            self.cursor_y += 1;
-        } else {
-            self.display_y += 1;
-        }
+        self.display_y = self.display_y.saturating_add(1);
     }
 
     pub fn move_cursor(&mut self, key: termion::event::Key) {
@@ -294,8 +330,27 @@ impl Editor {
                 }
                 self.previous_positions = VecDeque::new();
             },
+            termion::event::Key::Home => {
+                self.cursor_x = 0;
+                self.display_x = 0;
+                self.previous_positions = VecDeque::new();
+            },
+            termion::event::Key::End => {
+                self.cursor_x = self.document.row(self.display_y + self.cursor_y).unwrap().str_len();
+                self.display_x = self.cursor_x.saturating_sub(self.display_width);
+                self.previous_positions = VecDeque::new();
+            },
             _ => (),
         }
+    }
+
+    pub fn status_bar(&self, key: &termion::event::Key) {
+        let mut status = format!("{:?}", self.key_pressed.as_ref().unwrap());
+        
+        for _ in 0..self.display_width - status.to_string().chars().count() {
+            status.push(' ');
+        }
+        println!("{}{}{}", STATUS_BAR, status, ANSI_END);
     }
 
     pub fn refresh_screen(&mut self) -> Result<(), std::io::Error> {
@@ -306,7 +361,7 @@ impl Editor {
             self.terminal.clear_screen();
             println!("Goodbye.\r");
         } else {
-            self.render_doc();
+            self.render();
             self.terminal.cursor_position(self.cursor_x, self.cursor_y);
         }
         self.terminal.show_cursor();
