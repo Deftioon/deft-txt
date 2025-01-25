@@ -123,6 +123,11 @@ impl GapBuffer {
         self.remove(offset..offset + 1);
     }
 
+    pub fn replace_char(&mut self, offset: usize, c: char) {
+        self.remove_char(offset);
+        self.insert_char(offset, c);
+    }
+
     pub fn from_str(s: &str) -> Self {
         let mut buffer = GapBuffer::new(s.len());
         buffer.insert(0, s.as_bytes());

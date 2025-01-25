@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::editor::{document, terminal};
+use crate::editor::{document, terminal, util};
 
 pub static BLACK: &str = "\x1B[0;30m";
 pub static RED: &str = "\x1B[0;31m";
@@ -11,6 +11,7 @@ pub static MAGENTA: &str = "\x1B[0;35m";
 pub static CYAN: &str = "\x1B[0;36m";
 pub static WHITE: &str = "\x1B[0;37m";
 pub static STATUS_BAR: &str = "\x1B[48;5;237m";
+pub static SIDEBAR: &str = "\x1B[48;5;234m";
 static ANSI_END: &str = "\x1B[0m";
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -18,6 +19,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
+#[derive(PartialEq, Eq)]
 enum EditorState {
     EDIT,
     COMMAND,
@@ -38,16 +40,19 @@ pub struct Editor {
     previous_positions: VecDeque<(usize, usize)>,
     state: EditorState,
     key_pressed: Option<termion::event::Key>,
+    status_text: util::GapBuffer,
+    sidebar: document::Document,
 }
-
+//TODO: Implement the sidebar
+//TODO: Implement row numbers
 impl Editor {
     pub fn new() -> Result<Self, std::io::Error> {
         let terminal = terminal::Terminal::new()?;
         let document = document::Document::open("test.txt");
         let doc_rows = document.rows();
         let doc_cols = document.cols();
-        let display_height = terminal.height - 2;
-        let display_width = terminal.width;
+        let display_height = terminal.height - 4; // I have no idea why its -4
+        let display_width = (terminal.width as f64 * 0.75) as usize;
         Ok(Editor {
             terminal,
             document,
@@ -62,17 +67,19 @@ impl Editor {
             file_rows: doc_rows,
             previous_positions: VecDeque::new(),
             state: EditorState::EDIT,
-            key_pressed: None,
+            key_pressed: Some(termion::event::Key::Null),
+            status_text: util::GapBuffer::from_str(""),
+            sidebar: document::Document::open("test.txt"),
         })
     }
 
     pub fn run(&mut self) {
         self.terminal.clear_screen();
         loop {
-            if let Err(err) = self.process_keys() {
+            if let Err(err) = self.refresh_screen() {
                 self.kill(err);
             }
-            if let Err(err) = self.refresh_screen() {
+            if let Err(err) = self.process_keys() {
                 self.kill(err);
             }
             if self.exit {
@@ -82,20 +89,41 @@ impl Editor {
     }
 
     pub fn render(&self) {
+        for row in 0..self.display_y {
+            self.terminal.clear_line();
+            println!("~\r");
+        }
         for row_num in self.display_y..self.display_y + self.display_height {
             self.terminal.clear_line();
             if row_num < self.document.rows() {
                 let row = self.document.row(row_num).unwrap();
                 let start = self.display_x;
                 let end = self.display_x + self.display_width;
-                let rendered = row.render(start, end);
+                let mut rendered = row.render(start, end);
+                for _ in 0..self.display_width - rendered.chars().count() + 1 {
+                    rendered.push(' ');
+                }
+                rendered.push_str(STATUS_BAR);
+                rendered.push('┊');
+                let side_row = self.sidebar.row(row_num - self.display_y).unwrap();
+                rendered.push_str(side_row.render(0, self.terminal.width - self.display_width - 3).as_str());
+                for _ in side_row.str_len()..self.terminal.width - self.display_width - 3 {
+                    rendered.push(' ');
+                }
+                rendered.push('┃');
+                rendered.push_str(ANSI_END);
+                //TODO: Move print render statement to end of function for more flexible side bar control.
                 println!("{}\r", rendered);
             }
             else {
-                println!("~\r");
+                let mut rendered = "~";
+                println!("{}\r", rendered);
             }
             if row_num == self.display_y + self.display_height - 1 {
-                self.status_bar(self.key_pressed.as_ref().unwrap());
+                println!("");
+                self.status_bar(0, &termion::event::Key::Null);
+                self.status_bar(1, &termion::event::Key::Null);
+                self.status_bar(2, self.key_pressed.as_ref().unwrap());
             }
         }
     }
@@ -104,6 +132,9 @@ impl Editor {
         let key = self.terminal.read_key()?;
         self.key_pressed = Some(key);
         match key {
+            termion::event::Key::Esc => {
+                self.state = EditorState::COMMAND;
+            }, 
             termion::event::Key::Ctrl('q') => {
                 self.exit = true;
             },
@@ -135,6 +166,17 @@ impl Editor {
     }
 
     pub fn insert_text(&mut self, key: termion::event::Key) {
+        match self.state {
+            EditorState::EDIT => {
+                self.insert_text_edit(key);
+            },
+            EditorState::COMMAND => {
+                self.insert_text_command(key);
+            },
+        }
+    }
+
+    fn insert_text_edit(&mut self, key: termion::event::Key) {
         match key {
             termion::event::Key::Char(c) => {
                 let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
@@ -145,9 +187,37 @@ impl Editor {
         }
     }
 
+    fn insert_text_command(&mut self, key: termion::event::Key) {
+        match key {
+            termion::event::Key::Char(c) => {
+                self.status_text.insert_char(self.cursor_x, c);
+                self.cursor_x = self.cursor_x.saturating_add(1);
+            },
+            _ => (),
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        match self.state {
+            EditorState::EDIT => {
+                self.backspace_edit();
+            },
+            EditorState::COMMAND => {
+                self.backspace_command();
+            },
+        }
+    }
+
+
+    // FIXME: Backspace command is not working, when backspace is pressed a big chunk of trailing whitespace is deleted.
+    fn backspace_command(&mut self) {
+        self.status_text.remove_char(self.cursor_x);
+        self.cursor_x = self.cursor_x.saturating_sub(1);
+    }
+
     //TODO: Pressing backspace and insertion in rapid succession causes the next character to be deleted also.
     //TODO: does not handle backspace at the beginning of the line
-    pub fn backspace(&mut self) {
+    fn backspace_edit(&mut self) {
         let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
         if self.cursor_x > 0 {
             row.remove_char(self.display_x + self.cursor_x - 1);
@@ -196,6 +266,22 @@ impl Editor {
     }
 
     pub fn delete(&mut self) {
+        match self.state {
+            EditorState::EDIT => {
+                self.delete_edit();
+            },
+            EditorState::COMMAND => {
+                self.delete_command();
+            },
+        }
+    }
+
+    // TODO: Implement delete command because its not working
+    fn delete_command(&mut self) {
+        self.status_text.remove_char(self.cursor_x);
+    }
+
+    fn delete_edit(&mut self) {
         let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
         if self.cursor_x < row.str_len() {
             row.remove_char(self.display_x + self.cursor_x);
@@ -229,6 +315,22 @@ impl Editor {
     }
 
     pub fn enter(&mut self) {
+        match self.state {
+            EditorState::EDIT => {
+                self.enter_edit();
+            },
+            EditorState::COMMAND => {
+                self.enter_command();
+            },
+        }
+    }
+
+    fn enter_command(&mut self) {
+        self.status_text = util::GapBuffer::from_str("");
+        self.cursor_x = 0;
+    }
+
+    fn enter_edit(&mut self) {
         let actual_row = self.display_y + self.cursor_y;
         let current_col = self.cursor_x;
         
@@ -253,7 +355,6 @@ impl Editor {
     }
 
     pub fn move_cursor_command(&mut self, key: termion::event::Key) {
-
     }
 
     // TODO: Fix the cursor state save where it should return to previous position
@@ -344,13 +445,39 @@ impl Editor {
         }
     }
 
-    pub fn status_bar(&self, key: &termion::event::Key) {
-        let mut status = format!("{:?}", self.key_pressed.as_ref().unwrap());
+    pub fn status_bar(&self, row: usize, key: &termion::event::Key) {
+        let mut status = String::new();
+
+        match row {
+            0 => {
+                status.push_str(format!("File: {} - {} lines", self.document.file_path, self.file_rows).as_str());
+            },
+            1 => {
+                status.push_str(format!("{}", self.status_text).as_str());
+            },
+            2 => {
+                match self.state {
+                    EditorState::EDIT => {
+                        status.push_str("EDIT MODE");
+                    },
+                    EditorState::COMMAND => {
+                        status.push_str("COMMAND MODE");
+                    },
+                }
+                match key {
+                    termion::event::Key::Ctrl('s') => {
+                        status.push_str(format!("File saved to {}.", self.document.file_path).as_str());
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
         
-        for _ in 0..self.display_width - status.to_string().chars().count() {
+        for _ in 0..self.terminal.width - status.to_string().chars().count() {
             status.push(' ');
         }
-        println!("{}{}{}", STATUS_BAR, status, ANSI_END);
+        print!("{}{}{}", STATUS_BAR, status, ANSI_END);
     }
 
     pub fn refresh_screen(&mut self) -> Result<(), std::io::Error> {
@@ -362,7 +489,14 @@ impl Editor {
             println!("Goodbye.\r");
         } else {
             self.render();
-            self.terminal.cursor_position(self.cursor_x, self.cursor_y);
+            match self.state {
+                EditorState::EDIT => {
+                    self.terminal.cursor_position(self.cursor_x, self.cursor_y);
+                },
+                EditorState::COMMAND => {
+                    self.terminal.cursor_position(self.cursor_x, self.terminal.height - 2);
+                },
+            }
         }
         self.terminal.show_cursor();
         self.terminal.flush()
