@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::editor::{document, terminal, util};
+use crate::editor::{document, terminal, util, highlighting};
 
 pub static BLACK: &str = "\x1B[0;30m";
 pub static RED: &str = "\x1B[0;31m";
@@ -48,11 +48,11 @@ pub struct Editor {
 impl Editor {
     pub fn new() -> Result<Self, std::io::Error> {
         let terminal = terminal::Terminal::new()?;
-        let document = document::Document::open("test.txt");
+        let document = document::Document::open("src/editor/editor.rs");
         let doc_rows = document.rows();
         let doc_cols = document.cols();
         let display_height = terminal.height - 4; // I have no idea why its -4
-        let display_width = (terminal.width as f64 * 0.75) as usize;
+        let display_width = (terminal.width as f64 * 0.75) as usize -10;
         Ok(Editor {
             terminal,
             document,
@@ -87,45 +87,137 @@ impl Editor {
             }
         }
     }
+    // TODO: FIXME: THE TEXT IS RENDERING ONE LINE TOO LATE
+    pub fn render_new(&self) {
+        // Calculate line number width dynamically
+        let line_number_width = if self.file_rows == 0 {
+            1
+        } else {
+            (self.file_rows.checked_ilog10().unwrap_or(0) + 1) as usize
+        }.max(3); // Minimum 3 digits for alignment
 
-    pub fn render(&self) {
-        for row in 0..self.display_y {
+        // Calculate scroll proportions
+        let (scroll_height, scroll_start) = self.calculate_scrollbar();
+        let total_sidebar_width = self.terminal.width - self.display_width - 2;
+
+        for line in 0..self.display_height {
             self.terminal.clear_line();
-            println!("~\r");
+            let main_row = self.display_y + line;
+            let is_scroll_thumb = line >= scroll_start && line < scroll_start + scroll_height;
+
+            // Main content
+            let main_content = if main_row < self.document.rows() {
+                self.document.row(main_row).unwrap()
+                    .render(self.display_x, self.display_x + self.display_width)
+            } else {
+                "~".to_string()
+            };
+
+            // Line numbers (right-aligned)
+            let line_num = if main_row < self.file_rows {
+                format!("{:>width$}", main_row + 1, width = line_number_width)
+            } else {
+                "~".repeat(line_number_width)
+            };
+
+            // Sidebar content
+            let sidebar_content = if line < self.sidebar.rows() {
+                self.sidebar.row(line).unwrap()
+                    .render(0, total_sidebar_width - line_number_width - 3)
+            } else {
+                String::new()
+            };
+
+            // Construct line with proper formatting
+            let mut rendered = String::new();
+            
+            // Main content area
+            rendered.push_str(&main_content);
+            rendered.push_str(&" ".repeat(self.display_width.saturating_sub(main_content.chars().count())));
+            
+            // Separator and line numbers
+            rendered.push_str(&format!(
+                "{SIDEBAR}┆{}{} {}{}{}┃{ANSI_END}\r",
+                line_num,
+                if is_scroll_thumb { "█" } else { "│" },
+                sidebar_content,
+                " ".repeat(total_sidebar_width.saturating_sub(sidebar_content.chars().count() + line_number_width + 2)),
+                STATUS_BAR
+            ));
+
+            println!("{}", rendered);
         }
-        for row_num in self.display_y..self.display_y + self.display_height {
+
+        // Status bars
+        self.status_bar(0, &termion::event::Key::Null);
+        self.status_bar(1, &termion::event::Key::Null);
+        self.status_bar(2, self.key_pressed.as_ref().unwrap());
+    }
+
+    fn calculate_scrollbar(&self) -> (usize, usize) {
+        let total = self.file_rows.max(1);
+        let visible = self.display_height;
+        let ratio = visible as f32 / total as f32;
+        
+        let thumb_height = (visible as f32 * ratio).ceil() as usize;
+        let thumb_height = thumb_height.clamp(1, visible);
+        
+        let max_scroll = total.saturating_sub(visible);
+        let thumb_pos = if max_scroll > 0 {
+            (self.display_y * (visible - thumb_height)) / max_scroll
+        } else {
+            0
+        };
+
+        (thumb_height, thumb_pos)
+    }
+
+    pub fn render_old(&self) {
+        for line in 0..self.display_height {
             self.terminal.clear_line();
-            if row_num < self.document.rows() {
-                let row = self.document.row(row_num).unwrap();
-                let start = self.display_x;
-                let end = self.display_x + self.display_width;
-                let mut rendered = row.render(start, end);
-                for _ in 0..self.display_width - rendered.chars().count() + 1 {
-                    rendered.push(' ');
-                }
-                rendered.push_str(STATUS_BAR);
-                rendered.push('┊');
-                let side_row = self.sidebar.row(row_num - self.display_y).unwrap();
-                rendered.push_str(side_row.render(0, self.terminal.width - self.display_width - 3).as_str());
-                for _ in side_row.str_len()..self.terminal.width - self.display_width - 3 {
-                    rendered.push(' ');
-                }
-                rendered.push('┃');
-                rendered.push_str(ANSI_END);
-                //TODO: Move print render statement to end of function for more flexible side bar control.
-                println!("{}\r", rendered);
+            let main_row_num = self.display_y + line;
+            let sidebar_row_num = line;
+    
+            // Render main document content
+            let main_content = if main_row_num < self.document.rows() {
+                let row = self.document.row(main_row_num).unwrap();
+                row.render(self.display_x, self.display_x + self.display_width)
+            } else {
+                "~".to_string()
+            };
+    
+            // Render sidebar content
+            let sidebar_content = if sidebar_row_num < self.sidebar.rows() {
+                let row = self.sidebar.row(sidebar_row_num).unwrap();
+                row.render(0, self.terminal.width - self.display_width - 3)
+            } else {
+                "~".to_string()
+            };
+    
+            // Construct the full line with padding
+            let mut rendered = String::new();
+            rendered.push_str(&main_content);
+            // Add padding to main content
+            for _ in main_content.chars().count()..self.display_width {
+                rendered.push(' ');
             }
-            else {
-                let mut rendered = "~";
-                println!("{}\r", rendered);
+            rendered.push_str(STATUS_BAR);
+            rendered.push('┊');
+            rendered.push_str(&sidebar_content);
+            // Add padding to sidebar content
+            for _ in sidebar_content.chars().count()..(self.terminal.width - self.display_width - 3) {
+                rendered.push(' ');
             }
-            if row_num == self.display_y + self.display_height - 1 {
-                println!("");
-                self.status_bar(0, &termion::event::Key::Null);
-                self.status_bar(1, &termion::event::Key::Null);
-                self.status_bar(2, self.key_pressed.as_ref().unwrap());
-            }
+            rendered.push('┃');
+            rendered.push_str(ANSI_END);
+    
+            println!("{}\r", rendered);
         }
+    
+        // Status bars
+        self.status_bar(0, &termion::event::Key::Null);
+        self.status_bar(1, &termion::event::Key::Null);
+        self.status_bar(2, self.key_pressed.as_ref().unwrap());
     }
 
     pub fn process_keys(&mut self) -> Result<(), std::io::Error> {
@@ -133,7 +225,7 @@ impl Editor {
         self.key_pressed = Some(key);
         match key {
             termion::event::Key::Esc => {
-                self.state = EditorState::COMMAND;
+                self.escape();
             }, 
             termion::event::Key::Ctrl('q') => {
                 self.exit = true;
@@ -197,6 +289,18 @@ impl Editor {
         }
     }
 
+    pub fn escape(&mut self) {
+        match self.state {
+            EditorState::EDIT => {
+                self.state = EditorState::COMMAND;
+                self.cursor_x = 0;
+            }
+            EditorState::COMMAND => {
+                self.state = EditorState::EDIT;
+            }
+        }
+    }
+
     pub fn backspace(&mut self) {
         match self.state {
             EditorState::EDIT => {
@@ -211,6 +315,7 @@ impl Editor {
 
     // FIXME: Backspace command is not working, when backspace is pressed a big chunk of trailing whitespace is deleted.
     fn backspace_command(&mut self) {
+        if self.cursor_x == 0 { return }
         self.status_text.remove_char(self.cursor_x);
         self.cursor_x = self.cursor_x.saturating_sub(1);
     }
@@ -326,7 +431,8 @@ impl Editor {
     }
 
     fn enter_command(&mut self) {
-        self.status_text = util::GapBuffer::from_str("");
+        let text = format!("Executed {}", self.status_text.to_string());
+        self.status_text = util::GapBuffer::from_str(&text);
         self.cursor_x = 0;
     }
 
@@ -488,7 +594,7 @@ impl Editor {
             self.terminal.clear_screen();
             println!("Goodbye.\r");
         } else {
-            self.render();
+            self.render_old();
             match self.state {
                 EditorState::EDIT => {
                     self.terminal.cursor_position(self.cursor_x, self.cursor_y);
