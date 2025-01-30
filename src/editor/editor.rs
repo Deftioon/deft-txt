@@ -75,11 +75,14 @@ impl Editor {
 
     pub fn run(&mut self) {
         self.terminal.clear_screen();
+        if let Err(err) = self.refresh_screen() {
+            self.kill(err);
+        }
         loop {
-            if let Err(err) = self.refresh_screen() {
-                self.kill(err);
-            }
             if let Err(err) = self.process_keys() {
+                self.kill(err);
+            }   
+            if let Err(err) = self.refresh_screen() {
                 self.kill(err);
             }
             if self.exit {
@@ -541,6 +544,7 @@ impl Editor {
 
         if self.exit {
             self.terminal.clear_screen();
+            self.terminal.cursor_position(0, 0);
             println!("Goodbye.\r");
         } else {
             self.render();
