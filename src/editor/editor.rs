@@ -87,68 +87,64 @@ impl Editor {
             }
         }
     }
-    // TODO: FIXME: THE TEXT IS RENDERING ONE LINE TOO LATE
-    pub fn render_new(&self) {
-        // Calculate line number width dynamically
-        let line_number_width = if self.file_rows == 0 {
-            1
+    // TODO: FIXME: BACKSPACE ISNT WORKING WEEEEEEE
+    pub fn render_row(&self, line: usize) -> String {
+        let main_row_num = self.display_y + line;
+        let sidebar_row_num = line;
+    
+        // Reserve 1 column for the scrollbar
+        let main_content_width = self.display_width - 1;
+    
+        let main_content = if main_row_num < self.document.rows() {
+            let row = self.document.row(main_row_num).unwrap();
+            row.render(self.display_x, self.display_x + main_content_width)
         } else {
-            (self.file_rows.checked_ilog10().unwrap_or(0) + 1) as usize
-        }.max(3); // Minimum 3 digits for alignment
-
-        // Calculate scroll proportions
-        let (scroll_height, scroll_start) = self.calculate_scrollbar();
-        let total_sidebar_width = self.terminal.width - self.display_width - 2;
-
-        for line in 0..self.display_height {
-            self.terminal.clear_line();
-            let main_row = self.display_y + line;
-            let is_scroll_thumb = line >= scroll_start && line < scroll_start + scroll_height;
-
-            // Main content
-            let main_content = if main_row < self.document.rows() {
-                self.document.row(main_row).unwrap()
-                    .render(self.display_x, self.display_x + self.display_width)
-            } else {
-                "~".to_string()
-            };
-
-            // Line numbers (right-aligned)
-            let line_num = if main_row < self.file_rows {
-                format!("{:>width$}", main_row + 1, width = line_number_width)
-            } else {
-                "~".repeat(line_number_width)
-            };
-
-            // Sidebar content
-            let sidebar_content = if line < self.sidebar.rows() {
-                self.sidebar.row(line).unwrap()
-                    .render(0, total_sidebar_width - line_number_width - 3)
-            } else {
-                String::new()
-            };
-
-            // Construct line with proper formatting
-            let mut rendered = String::new();
-            
-            // Main content area
-            rendered.push_str(&main_content);
-            rendered.push_str(&" ".repeat(self.display_width.saturating_sub(main_content.chars().count())));
-            
-            // Separator and line numbers
-            rendered.push_str(&format!(
-                "{SIDEBAR}┆{}{} {}{}{}┃{ANSI_END}\r",
-                line_num,
-                if is_scroll_thumb { "█" } else { "│" },
-                sidebar_content,
-                " ".repeat(total_sidebar_width.saturating_sub(sidebar_content.chars().count() + line_number_width + 2)),
-                STATUS_BAR
-            ));
-
-            println!("{}", rendered);
+            "~".to_string()
+        };
+    
+        let sidebar_content = if sidebar_row_num < self.sidebar.rows() {
+            let row = self.sidebar.row(sidebar_row_num).unwrap();
+            row.render(0, self.terminal.width - self.display_width - 3)
+        } else {
+            "~".to_string()
+        };
+    
+        let (thumb_height, thumb_pos) = self.calculate_scrollbar();
+    
+        let mut rendered = String::new();
+        rendered.push_str(&main_content);
+        // Pad main content to its width
+        for _ in main_content.chars().count()..main_content_width {
+            rendered.push(' ');
         }
-
-        // Status bars
+        // Add scrollbar character if within the thumb
+        if line >= thumb_pos && line < thumb_pos + thumb_height {
+            rendered.push_str("▓");
+        } else {
+            rendered.push(' ');
+        }
+        rendered.push_str(STATUS_BAR);
+        rendered.push('┊');
+        rendered.push_str(&sidebar_content);
+        // Pad sidebar content
+        for _ in sidebar_content.chars().count()..(self.terminal.width - self.display_width - 3) {
+            rendered.push(' ');
+        }
+        rendered.push('┃');
+        rendered.push_str(ANSI_END);
+    
+        rendered
+    }
+    
+    pub fn render(&self) {
+        self.terminal.clear_screen();
+    
+        for line in 0..self.display_height {
+            self.terminal.cursor_position(0, line);
+            self.terminal.clear_line();
+            let rendered = self.render_row(line);
+            println!("{}\r", rendered);
+        }
         self.status_bar(0, &termion::event::Key::Null);
         self.status_bar(1, &termion::event::Key::Null);
         self.status_bar(2, self.key_pressed.as_ref().unwrap());
@@ -170,54 +166,6 @@ impl Editor {
         };
 
         (thumb_height, thumb_pos)
-    }
-
-    pub fn render_old(&self) {
-        for line in 0..self.display_height {
-            self.terminal.clear_line();
-            let main_row_num = self.display_y + line;
-            let sidebar_row_num = line;
-    
-            // Render main document content
-            let main_content = if main_row_num < self.document.rows() {
-                let row = self.document.row(main_row_num).unwrap();
-                row.render(self.display_x, self.display_x + self.display_width)
-            } else {
-                "~".to_string()
-            };
-    
-            // Render sidebar content
-            let sidebar_content = if sidebar_row_num < self.sidebar.rows() {
-                let row = self.sidebar.row(sidebar_row_num).unwrap();
-                row.render(0, self.terminal.width - self.display_width - 3)
-            } else {
-                "~".to_string()
-            };
-    
-            // Construct the full line with padding
-            let mut rendered = String::new();
-            rendered.push_str(&main_content);
-            // Add padding to main content
-            for _ in main_content.chars().count()..self.display_width {
-                rendered.push(' ');
-            }
-            rendered.push_str(STATUS_BAR);
-            rendered.push('┊');
-            rendered.push_str(&sidebar_content);
-            // Add padding to sidebar content
-            for _ in sidebar_content.chars().count()..(self.terminal.width - self.display_width - 3) {
-                rendered.push(' ');
-            }
-            rendered.push('┃');
-            rendered.push_str(ANSI_END);
-    
-            println!("{}\r", rendered);
-        }
-    
-        // Status bars
-        self.status_bar(0, &termion::event::Key::Null);
-        self.status_bar(1, &termion::event::Key::Null);
-        self.status_bar(2, self.key_pressed.as_ref().unwrap());
     }
 
     pub fn process_keys(&mut self) -> Result<(), std::io::Error> {
@@ -321,6 +269,7 @@ impl Editor {
     }
 
     //TODO: Pressing backspace and insertion in rapid succession causes the next character to be deleted also.
+    //TODO: Pressing backspace also removes a huge chunk of whitespace and offsets the sidebar.
     //TODO: does not handle backspace at the beginning of the line
     fn backspace_edit(&mut self) {
         let row = self.document.row_mut(self.display_y + self.cursor_y).unwrap();
@@ -529,10 +478,10 @@ impl Editor {
                 if self.cursor_x == self.document.row(self.display_y + self.cursor_y).unwrap().str_len() {
                     return;
                 }
-                if self.cursor_x < self.display_width {
+                if self.cursor_x < self.display_width - 1 {
                     self.cursor_x = self.cursor_x.saturating_add(1);
                 }
-                if self.cursor_x == self.display_width && self.display_x < max_x {
+                if self.cursor_x == self.display_width - 1 && self.display_x < max_x {
                     self.display_x = self.display_x.saturating_add(1);
                 }
                 self.previous_positions = VecDeque::new();
@@ -594,13 +543,13 @@ impl Editor {
             self.terminal.clear_screen();
             println!("Goodbye.\r");
         } else {
-            self.render_old();
+            self.render();
             match self.state {
                 EditorState::EDIT => {
                     self.terminal.cursor_position(self.cursor_x, self.cursor_y);
                 },
                 EditorState::COMMAND => {
-                    self.terminal.cursor_position(self.cursor_x, self.terminal.height - 2);
+                    self.terminal.cursor_position(self.cursor_x, self.terminal.height - 3);
                 },
             }
         }
